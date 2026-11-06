@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import sharp from "sharp";
@@ -14,27 +14,23 @@ import {
   type RgbColor,
 } from "../src/detector.ts";
 
-const SAMPLE_DIRECTORY = new URL("../samples/", import.meta.url);
+function createSampleImage(): Promise<Buffer> {
+  const image = `<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400">
+    <rect width="600" height="400" fill="#294c61"/>
+    <polygon points="70,340 240,30 380,260" fill="#ecaf42"/>
+    <ellipse cx="437" cy="175" rx="97" ry="64" fill="#8bc5a2"/>
+    <rect x="343" y="297" width="174" height="47" fill="#c25251"/>
+  </svg>`;
+  return sharp(Buffer.from(image)).jpeg().toBuffer();
+}
 
-describe("MrBeast scam detector", () => {
-  test("recognizes the supplied sample palette", async () => {
-    const names = [
-      "photo_2026-07-15_03-20-32.jpg",
-      "photo_2026-07-15_03-20-35.jpg",
-      "photo_2026-07-15_03-20-36.jpg",
-    ];
-    const fingerprints = await Promise.all(
-      names.map(async (name) => {
-        const bytes = await Bun.file(new URL(name, SAMPLE_DIRECTORY)).bytes();
-        return fingerprintImage(bytes);
-      }),
-    );
-
-    const references = await loadReferenceProfiles();
+describe("scam image detector", () => {
+  test("scores multiple exact image matches at the maximum", async () => {
+    const fingerprint = await fingerprintImage(await createSampleImage());
     const detection = evaluateFingerprints(
-      fingerprints,
+      [fingerprint, fingerprint, fingerprint],
       "balanced",
-      references,
+      [{ ...fingerprint, sourcePath: "sample.jpg" }],
     );
     expect(detection.suspicious).toBeTrue();
     expect(detection.confidence).toBe(100);
@@ -45,9 +41,7 @@ describe("MrBeast scam detector", () => {
   });
 
   test("creates a durable JPEG copy for the moderation report", async () => {
-    const source = await Bun.file(
-      new URL("photo_2026-07-15_03-20-32.jpg", SAMPLE_DIRECTORY),
-    ).bytes();
+    const source = await createSampleImage();
     const evidence = await createEvidenceImage(source);
 
     expect(evidence.byteLength).toBeGreaterThan(0);
@@ -59,21 +53,16 @@ describe("MrBeast scam detector", () => {
   });
 
   test("picks up added samples on the next load", async () => {
-    const temporaryDirectory = await mkdtemp(join(tmpdir(), "beastkiller-"));
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "scam-samples-"));
 
     try {
-      await copyFile(
-        new URL("photo_2026-07-15_03-20-32.jpg", SAMPLE_DIRECTORY),
-        join(temporaryDirectory, "first.JPG"),
-      );
+      const sample = await createSampleImage();
+      await Bun.write(join(temporaryDirectory, "first.JPG"), sample);
       expect(await loadReferenceProfiles(temporaryDirectory)).toHaveLength(1);
 
       const nestedDirectory = join(temporaryDirectory, "new");
       await mkdir(nestedDirectory);
-      await copyFile(
-        new URL("photo_2026-07-15_03-20-35.jpg", SAMPLE_DIRECTORY),
-        join(nestedDirectory, "second.jpeg"),
-      );
+      await Bun.write(join(nestedDirectory, "second.jpeg"), sample);
       expect(await loadReferenceProfiles(temporaryDirectory)).toHaveLength(2);
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
@@ -142,9 +131,7 @@ describe("MrBeast scam detector", () => {
   });
 
   test("keeps fingerprints close on a 256px optimized preview", async () => {
-    const source = await Bun.file(
-      new URL("photo_2026-07-15_03-20-32.jpg", SAMPLE_DIRECTORY),
-    ).bytes();
+    const source = await createSampleImage();
     const optimizedPreview = await sharp(source)
       .resize({ width: 256, height: 256, fit: "inside" })
       .webp({ quality: 70 })

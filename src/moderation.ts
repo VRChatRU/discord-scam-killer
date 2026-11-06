@@ -13,7 +13,8 @@ import {
   time,
   TimestampStyles,
 } from "discord.js";
-import type { BotDatabase, GuildSettings } from "./database.ts";
+import type { GuildSettings } from "./config.ts";
+import type { BotDatabase } from "./database.ts";
 import { logger, type LogContext } from "./logger.ts";
 import {
   createEvidenceImage,
@@ -428,15 +429,16 @@ async function sendEvidenceReport(
 
 export async function inspectMessage(
   message: Message,
-  database: BotDatabase,
+  settings: GuildSettings,
   referenceProfiles: readonly ReferenceProfile[],
 ): Promise<void> {
-  if (!message.inGuild() || message.author.bot || message.webhookId) {
-    return;
-  }
-
-  // The most common path exits before a settings lookup or any allocation.
-  if (message.attachments.size === 0) {
+  if (
+    !message.inGuild() ||
+    message.guildId !== settings.guildId ||
+    message.author.bot ||
+    message.webhookId ||
+    message.attachments.size === 0
+  ) {
     return;
   }
 
@@ -448,15 +450,6 @@ export async function inspectMessage(
     attachmentCount: message.attachments.size,
   };
   logger.debug("Attachment message received", baseLogContext);
-
-  const settings = database.getSettings(message.guildId);
-  if (!settings) {
-    logger.debug("Attachment message skipped", {
-      ...baseLogContext,
-      reason: "guild is not configured",
-    });
-    return;
-  }
 
   const supportedImages = message.attachments.filter(isSupportedImage);
   const attachments = supportedImages.first(MAXIMUM_IMAGE_COUNT);
@@ -649,6 +642,7 @@ export function canModerate(
 export async function handleModerationButton(
   interaction: ButtonInteraction,
   database: BotDatabase,
+  settings: GuildSettings | undefined,
 ): Promise<boolean> {
   const match = BUTTON_PATTERN.exec(interaction.customId);
   if (!match) {
@@ -668,11 +662,14 @@ export async function handleModerationButton(
     return false;
   }
 
-  const settings = database.getSettings(interaction.guildId);
-  if (!settings || interaction.channelId !== settings.moderationChannelId) {
+  if (
+    !settings ||
+    interaction.guildId !== settings.guildId ||
+    interaction.channelId !== settings.moderationChannelId
+  ) {
     await interaction.reply({
       content:
-        "This moderation report is no longer linked to the active setup.",
+        "This moderation report is outside the configured server or channel.",
       flags: MessageFlags.Ephemeral,
     });
     return true;

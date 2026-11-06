@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import sharp from "sharp";
-import type { Sensitivity } from "./database.ts";
+import type { Sensitivity } from "./config.ts";
 import { logger } from "./logger.ts";
 
 export interface RgbColor {
@@ -252,12 +252,22 @@ export async function loadReferenceProfiles(
   samplesDirectory = DEFAULT_SAMPLES_DIRECTORY,
 ): Promise<ReferenceProfile[]> {
   const paths: string[] = [];
-  for await (const relativePath of new Bun.Glob("**/*").scan({
-    cwd: samplesDirectory,
-    onlyFiles: true,
-  })) {
-    if (SAMPLE_EXTENSION.test(relativePath)) {
-      paths.push(join(samplesDirectory, relativePath));
+  try {
+    for await (const relativePath of new Bun.Glob("**/*").scan({
+      cwd: samplesDirectory,
+      onlyFiles: true,
+    })) {
+      if (SAMPLE_EXTENSION.test(relativePath)) {
+        paths.push(join(samplesDirectory, relativePath));
+      }
+    }
+  } catch (error) {
+    if (!(
+      error instanceof Error &&
+      "code" in error &&
+      error.code === "ENOENT"
+    )) {
+      throw error;
     }
   }
   paths.sort((left, right) => left.localeCompare(right));

@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import {
+  ApplicationCommandType,
   Client,
   DefaultRestOptions,
   DiscordAPIError,
@@ -10,14 +11,16 @@ import {
   GatewayIntentBits,
   HTTPError,
   Partials,
+  type RESTGetAPIApplicationCommandsResult,
+  RESTJSONErrorCodes,
   Routes,
   Status,
 } from "discord.js";
+import type { GuildSettings } from "./config.ts";
 import type { BotDatabase } from "./database.ts";
 import { loadReferenceProfiles, type ReferenceProfile } from "./detector.ts";
 import { logger } from "./logger.ts";
 import { handleModerationButton, inspectMessage } from "./moderation.ts";
-import { handleSetupCommand, setupCommand } from "./setup-command.ts";
 
 const INITIAL_RETRY_MS = 5_000;
 const MAX_RETRY_MS = 60_000;
@@ -88,7 +91,45 @@ async function login(
   }
 }
 
-export function createBot(database: BotDatabase) {
+async function removeLegacySetup(
+  client: Client<true>,
+  signal: AbortSignal,
+): Promise<void> {
+  const applicationId = client.application.id;
+  const commands = (await client.rest.get(
+    Routes.applicationCommands(applicationId),
+    { signal },
+  )) as RESTGetAPIApplicationCommandsResult;
+  const setup = commands.find(
+    (command) =>
+      command.type === ApplicationCommandType.ChatInput &&
+      command.name === "setup",
+  );
+  if (!setup) return;
+
+  try {
+    await client.rest.delete(
+      Routes.applicationCommand(applicationId, setup.id),
+      {
+        signal,
+      },
+    );
+  } catch (error) {
+    if (
+      error instanceof DiscordAPIError &&
+      error.code === RESTJSONErrorCodes.UnknownApplicationCommand
+    ) {
+      return;
+    }
+    throw error;
+  }
+  logger.info("Removed legacy /setup command");
+}
+
+export function createBot(
+  database: BotDatabase,
+  guilds: ReadonlyMap<string, GuildSettings>,
+) {
   const shutdown = new AbortController();
   const inFlight = new Set<Promise<unknown>>();
   let client: Client | undefined;
@@ -141,53 +182,37 @@ export function createBot(database: BotDatabase) {
         guilds: readyClient.guilds.cache.size,
       });
 
-      // A POST upserts only /setup, preserving other commands for the same application.
       track(
         retryDiscordRequest(
-          () =>
-            readyClient.rest.post(
-              Routes.applicationCommands(readyClient.application.id),
-              {
-                body: setupCommand.toJSON(),
-                signal,
-              },
-            ),
-          "/setup registration",
+          () => removeLegacySetup(readyClient, signal),
+          "legacy /setup removal",
           signal,
         ),
-        "Could not register /setup",
+        "Could not remove legacy /setup command",
       );
     });
 
     connection.on(Events.MessageCreate, (message) => {
-      if (signal.aborted) return;
+      if (signal.aborted || !message.inGuild()) return;
+      const settings = guilds.get(message.guildId);
+      if (!settings) return;
       track(
-        inspectMessage(message, database, profiles),
+        inspectMessage(message, settings, profiles),
         "Could not inspect message",
         { messageId: message.id },
       );
     });
 
     connection.on(Events.InteractionCreate, (interaction) => {
-      if (signal.aborted) return;
-      const context = { interactionId: interaction.id };
-      if (
-        interaction.isChatInputCommand() &&
-        interaction.commandName === "setup" &&
-        interaction.inCachedGuild()
-      ) {
-        track(
-          handleSetupCommand(interaction, database),
-          "Could not configure guild",
-          context,
-        );
-      } else if (interaction.isButton()) {
-        track(
-          handleModerationButton(interaction, database),
-          "Could not handle moderation button",
-          context,
-        );
-      }
+      if (signal.aborted || !interaction.isButton()) return;
+      const settings = interaction.guildId
+        ? guilds.get(interaction.guildId)
+        : undefined;
+      track(
+        handleModerationButton(interaction, database, settings),
+        "Could not handle moderation button",
+        { interactionId: interaction.id },
+      );
     });
 
     connection.on(Events.Error, (error) => {

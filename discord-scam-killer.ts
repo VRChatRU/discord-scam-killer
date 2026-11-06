@@ -1,18 +1,12 @@
 import { once } from "node:events";
 import { createBot } from "./src/bot.ts";
+import { loadConfig } from "./src/config.ts";
 import { BotDatabase } from "./src/database.ts";
 import { startHeartbeat } from "./src/heartbeat.ts";
 import { logger } from "./src/logger.ts";
 
 async function run(): Promise<void> {
-  const token = Bun.env.DISCORD_TOKEN?.trim();
-  if (!token) throw new Error("Set DISCORD_TOKEN in .env");
-
-  const kumaUrl = URL.parse(Bun.env.UPTIME_KUMA_URL?.trim() ?? "");
-  if (!kumaUrl || !["http:", "https:"].includes(kumaUrl.protocol)) {
-    throw new Error("Set UPTIME_KUMA_URL to an HTTP(S) Push URL in .env");
-  }
-
+  const { token, kumaUrl, guilds } = loadConfig();
   const database = new BotDatabase();
   const shutdown = new AbortController();
   const stop = (signal: NodeJS.Signals) => {
@@ -23,9 +17,12 @@ async function run(): Promise<void> {
   process.once("SIGTERM", stop);
 
   try {
-    const bot = createBot(database);
+    const bot = createBot(database, guilds);
     try {
-      logger.info("Starting discord-scam-killer", { bun: Bun.version });
+      logger.info("Starting discord-scam-killer", {
+        bun: Bun.version,
+        configuredGuilds: guilds.size,
+      });
       startHeartbeat(kumaUrl, bot.isReady, shutdown.signal);
       await bot.start(token, shutdown.signal);
       if (!shutdown.signal.aborted) await once(shutdown.signal, "abort");
